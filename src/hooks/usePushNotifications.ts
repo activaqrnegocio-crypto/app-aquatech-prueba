@@ -1,8 +1,9 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
+import { isNative } from '@/lib/native-bridge'
 
-type PushStatus = 'loading' | 'unsupported' | 'denied' | 'prompt' | 'subscribed' | 'unsubscribed'
+type PushStatus = 'loading' | 'unsupported' | 'denied' | 'prompt' | 'subscribed' | 'unsubscribed' | 'native'
 
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   // v295: Limpieza robusta que soporta Base64 estándar (+/) y URL-safe (-_)
@@ -42,7 +43,28 @@ export function usePushNotifications() {
   useEffect(() => {
     if (typeof window === 'undefined') return
 
-    // Check browser support
+    const nativeMode = isNative()
+
+    // En la app nativa (APK), no disponemos de PushManager en el WebView,
+    // pero podemos activar las notificaciones locales/del sistema si 'Notification' existe.
+    if (nativeMode) {
+      if (!('Notification' in window)) {
+        setStatus('unsupported')
+        return
+      }
+
+      const permission = Notification.permission
+      if (permission === 'denied') {
+        setStatus('denied')
+      } else if (permission === 'granted') {
+        setStatus('subscribed')
+      } else {
+        setStatus('prompt')
+      }
+      return
+    }
+
+    // Check browser support (PWA normal en Chrome/Safari)
     if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
       setStatus('unsupported')
       return
@@ -92,6 +114,47 @@ export function usePushNotifications() {
   const subscribe = useCallback(async (): Promise<{ success: boolean; error?: string }> => {
     if (status === 'unsupported') return { success: false, error: 'Tu navegador no soporta notificaciones.' };
     if (status === 'denied') return { success: false, error: 'Permiso denegado. Habilítalo en los ajustes del navegador.' };
+
+    const nativeMode = isNative()
+    if (nativeMode) {
+      setIsSubscribing(true);
+      try {
+        let permission: NotificationPermission;
+        try {
+          permission = await Notification.requestPermission();
+        } catch (e) {
+          permission = await new Promise((res) => {
+            Notification.requestPermission((result) => res(result));
+          });
+        }
+
+        if (permission !== 'granted') {
+          setStatus('denied');
+          setIsSubscribing(false);
+          return { success: false, error: 'Permiso de notificaciones denegado por el usuario.' };
+        }
+
+        setStatus('subscribed');
+        setIsSubscribing(false);
+
+        // Mostrar notificación local de éxito nativa
+        try {
+          new Notification('✅ Notificaciones de App Activas', {
+            body: '¡Perfecto! Tu aplicación tiene permiso para recibir notificaciones nativas en el sistema.',
+            icon: '/icon-192.png',
+            badge: '/icon-192.png',
+          });
+        } catch (e) {
+          console.warn('[PUSH] Fallo al mostrar notificación local', e);
+        }
+
+        return { success: true };
+      } catch (error: any) {
+        setStatus('unsupported');
+        setIsSubscribing(false);
+        return { success: false, error: error.message || 'Error al activar notificaciones nativas.' };
+      }
+    }
 
     setIsSubscribing(true);
     

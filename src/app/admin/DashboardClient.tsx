@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePushNotifications } from '@/hooks/usePushNotifications'
+import { isNative } from '@/lib/native-bridge'
 import { NotificationOnboarding } from '@/components/NotificationOnboarding'
 import { IosInstallBanner } from '@/components/IosInstallBanner'
 import ManualSyncButton from '@/components/ManualSyncButton'
@@ -267,19 +268,25 @@ export default function DashboardClient({
                   ? 'Notificaciones Bloqueadas' 
                   : pushStatus === 'unsupported'
                   ? 'Notificaciones no soportadas'
+                  : isNative()
+                  ? 'Notificaciones en la App'
                   : 'Activa las Notificaciones de Administrador'}
               </p>
               <p style={{ margin: 0, color: 'rgba(255,255,255,0.85)', fontSize: '0.8rem' }}>
                 {pushStatus === 'denied'
-                  ? 'Debes habilitar los permisos en los ajustes de tu navegador.'
+                  ? 'Debes habilitar los permisos en los ajustes de tu celular o navegador.'
                   : pushStatus === 'unsupported'
-                  ? 'Tu iPhone (sin instalar) no permite avisos push.'
+                  ? (/iPad|iPhone|iPod/.test(navigator.userAgent) 
+                    ? 'Tu iPhone (sin instalar) no permite avisos push.' 
+                    : 'Tu navegador o dispositivo no admite avisos push.')
+                  : isNative()
+                  ? 'Recibe alertas nativas en tiempo real de tus proyectos y chats.'
                   : 'Recibe alertas en tiempo real de proyectos y mensajes'}
               </p>
             </div>
           </div>
           <div style={{ display: 'flex', gap: '12px', alignItems: 'center', zIndex: 5 }}>
-            {(pushStatus === 'denied' || pushStatus === 'unsupported' || /android|iphone|ipad/i.test(navigator.userAgent)) && (
+            {(pushStatus === 'denied' || pushStatus === 'unsupported' || (!isNative() && /android|iphone|ipad/i.test(navigator.userAgent))) && (
               <button
                 onClick={() => setShowOnboarding(true)}
                 style={{
