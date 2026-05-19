@@ -10,6 +10,8 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import com.getcapacitor.*
 import com.getcapacitor.annotation.CapacitorPlugin
+import com.getcapacitor.annotation.Permission
+import com.getcapacitor.annotation.PermissionCallback
 import kotlinx.coroutines.*
 import org.json.JSONArray
 import org.json.JSONObject
@@ -25,7 +27,15 @@ import java.util.UUID
  * 3. Arranca el SyncForegroundService para procesar la cola
  * 4. Reporta el estado de sync al WebView
  */
-@CapacitorPlugin(name = "SyncBridge")
+@CapacitorPlugin(
+    name = "SyncBridge",
+    permissions = [
+        Permission(
+            alias = "notifications",
+            strings = [android.Manifest.permission.POST_NOTIFICATIONS]
+        )
+    ]
+)
 class SyncBridgePlugin : Plugin() {
     
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -266,8 +276,8 @@ class SyncBridgePlugin : Plugin() {
     fun checkNotificationPermission(call: PluginCall) {
         val res = JSObject()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val permission = ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS)
-            res.put("granted", permission == android.content.pm.PackageManager.PERMISSION_GRANTED)
+            val state = getPermissionState("notifications")
+            res.put("granted", state == PermissionState.GRANTED)
         } else {
             res.put("granted", true)
         }
@@ -280,21 +290,27 @@ class SyncBridgePlugin : Plugin() {
     @PluginMethod
     fun requestNotificationPermission(call: PluginCall) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val activity = activity
-            if (activity != null) {
-                if (ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                    androidx.core.app.ActivityCompat.requestPermissions(
-                        activity,
-                        arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
-                        101
-                    )
-                }
+            val state = getPermissionState("notifications")
+            if (state != PermissionState.GRANTED) {
+                requestPermissionForAlias("notifications", call, "notificationsCallback")
+            } else {
+                val res = JSObject()
+                res.put("granted", true)
+                call.resolve(res)
             }
+        } else {
+            val res = JSObject()
+            res.put("granted", true)
+            call.resolve(res)
         }
+    }
+
+    @PermissionCallback
+    fun notificationsCallback(call: PluginCall) {
         val res = JSObject()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val permission = ContextCompat.checkSelfPermission(context, android.Manifest.permission.POST_NOTIFICATIONS)
-            res.put("granted", permission == android.content.pm.PackageManager.PERMISSION_GRANTED)
+            val state = getPermissionState("notifications")
+            res.put("granted", state == PermissionState.GRANTED)
         } else {
             res.put("granted", true)
         }
