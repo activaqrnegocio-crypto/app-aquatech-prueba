@@ -208,3 +208,155 @@ export class OfflineDatabase extends Dexie {
 }
 
 export const db = new OfflineDatabase();
+
+// Interceptar db.outbox.add para duplicar en el SQLite nativo de Room cuando estamos en la app
+const originalAdd = db.outbox.add.bind(db.outbox);
+(db.outbox as any).add = async function (item: OutboxItem, key?: any): Promise<any> {
+  // 1. Generar un syncId único si no existe
+  if (!item.syncId) {
+    item.syncId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 15);
+  }
+  
+  // 2. Guardar localmente en IndexedDB para respuesta instantánea de UI
+  const id = await originalAdd(item);
+  item.id = id;
+  
+  // 3. Si corre en Android nativo (Capacitor), replicar en Room DB nativa
+  try {
+    const { isNative, SyncBridge } = await import('./native-bridge');
+    if (isNative()) {
+      let endpoint = '';
+      let method: 'POST' | 'PATCH' | 'PUT' | 'DELETE' = 'POST';
+      
+      // Mapear tipo de outbox a endpoint y método del backend
+      if (item.type === 'QUOTE') { endpoint = '/api/quotes'; }
+      else if (item.type === 'MATERIAL') { endpoint = '/api/materials'; }
+      else if (item.type === 'MESSAGE' || item.type === 'MEDIA_UPLOAD' || item.type === 'LOCATION') { 
+        endpoint = `/api/projects/${item.projectId}/messages`; 
+      }
+      else if (item.type === 'EXPENSE') { 
+        if (item.payload?.id) {
+          endpoint = `/api/projects/${item.projectId}/expenses/${item.payload.id}`;
+          method = 'PATCH';
+        } else {
+          endpoint = `/api/projects/${item.projectId}/expenses`;
+          method = 'POST';
+        }
+      }
+      else if (item.type === 'EXPENSE_DELETE') {
+        endpoint = `/api/projects/${item.projectId}/expenses/${item.payload.expenseId}`;
+        method = 'DELETE';
+      }
+      else if (item.type === 'DAY_START') { endpoint = `/api/day-records`; }
+      else if (item.type === 'DAY_END') { endpoint = `/api/day-records`; method = 'PUT'; }
+      else if (item.type === 'PHASE_COMPLETE' || item.type === 'PHASE_UPDATE') { 
+        endpoint = `/api/projects/${item.projectId}/phases/${item.payload.phaseId}`; 
+        method = 'PATCH';
+      }
+      else if (item.type === 'PHASE_CREATE') {
+        endpoint = `/api/projects/${item.projectId}/phases`;
+        method = 'POST';
+      }
+      else if (item.type === 'PROJECT') { endpoint = '/api/projects'; }
+      else if (item.type === 'PROJECT_UPDATE') { endpoint = `/api/projects/${item.projectId}`; method = 'PATCH'; }
+      else if (item.type === 'TEAM_UPDATE') { endpoint = `/api/projects/${item.projectId}/team`; method = 'PUT'; }
+      else if (item.type === 'TASK') {
+        if (!item.payload?.isNew && (item.payload?.id || item.payload?._id)) {
+          endpoint = `/api/appointments/${item.payload.id || item.payload._id}`;
+          method = 'PATCH';
+        } else {
+          endpoint = '/api/appointments';
+        }
+      }
+      else if (item.type === 'TASK_STATUS_TOGGLE') { endpoint = `/api/appointments/${item.payload.appointmentId}`; method = 'PATCH'; }
+      else if (item.type === 'GALLERY_UPLOAD') { endpoint = `/api/projects/${item.projectId}/gallery`; }
+      else if (item.type === 'GALLERY_DELETE') { endpoint = `/api/projects/${item.projectId}/gallery/${item.payload.galleryId}`; method = 'DELETE'; }
+      else if (item.type === 'GALLERY_RENAME') { 
+        endpoint = `/api/projects/${item.projectId}/gallery/${item.payload.galleryId}`; 
+        method = 'PATCH'; 
+      }
+      
+      if (endpoint) {
+        let cleanPayload = { ...item.payload };
+        
+        // Manejo especial de archivos multimedia en nativo (evitar blobs en SQLite)
+        if (item.type === 'GALLERY_UPLOAD') {
+          let fileBase64 = '';
+          const filename = item.payload?.filename || `gallery_${Date.now()}`;
+          const mimeType = item.payload?.mimeType || 'image/jpeg';
+          
+          if (item.payload?.fileData?.base64) {
+            fileBase64 = item.payload.fileData.base64;
+          } else if (item.payload?.base64) {
+            fileBase64 = item.payload.base64;
+          } else if (item.payload?.file instanceof File || item.payload?.file instanceof Blob) {
+            fileBase64 = await fileToBase64(item.payload.file);
+          }
+          
+          if (fileBase64) {
+            const base64Data = fileBase64.includes('base64,') ? fileBase64.split('base64,')[1] : fileBase64;
+            const fileRes = await SyncBridge.enqueueFile(base64Data, filename, mimeType, item.syncId);
+            
+            cleanPayload.url = fileRes.filePath;
+            delete cleanPayload.file;
+            delete cleanPayload.fileData;
+            delete cleanPayload.base64;
+          }
+        } else if (item.type === 'MEDIA_UPLOAD' || (item.type === 'MESSAGE' && item.payload?.media)) {
+          let fileBase64 = '';
+          const filename = item.payload?.media?.filename || item.payload?.filename || `media_${Date.now()}`;
+          const mimeType = item.payload?.media?.mimeType || item.payload?.mimeType || 'image/jpeg';
+          
+          if (item.payload?.media?.fileData?.base64) {
+            fileBase64 = item.payload.media.fileData.base64;
+          } else if (item.payload?.media?.base64) {
+            fileBase64 = item.payload.media.base64;
+          } else if (item.payload?.file instanceof File || item.payload?.file instanceof Blob) {
+            fileBase64 = await fileToBase64(item.payload.file);
+          }
+          
+          if (fileBase64) {
+            const base64Data = fileBase64.includes('base64,') ? fileBase64.split('base64,')[1] : fileBase64;
+            const fileRes = await SyncBridge.enqueueFile(base64Data, filename, mimeType, item.syncId);
+            
+            cleanPayload.media = {
+              ...cleanPayload.media,
+              url: fileRes.filePath,
+              fileData: null,
+              base64: null
+            };
+          }
+        }
+        
+        await SyncBridge.enqueue({
+          type: item.type,
+          endpoint,
+          method,
+          payloadJson: JSON.stringify(cleanPayload),
+          syncId: item.syncId,
+          projectId: item.projectId || 0,
+          priority: 0,
+          editedAt: Date.now()
+        });
+        
+        // Disparar sincronización inmediata nativa
+        await SyncBridge.forceSync();
+      }
+    }
+  } catch (err) {
+    console.error('[SyncBridge] Error al replicar cola en Room nativo:', err);
+  }
+  
+  return id;
+};
+
+// Conversor de File a base64 asíncrono
+function fileToBase64(file: File | Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = error => reject(error);
+    reader.readAsDataURL(file);
+  });
+}
+

@@ -10,6 +10,9 @@
     "postinstall": "prisma generate"
   },
   "dependencies": {
+    "@capacitor/android": "^8.3.4",
+    "@capacitor/cli": "^8.3.4",
+    "@capacitor/core": "^8.3.4",
     "@ducanh2912/next-pwa": "^10.2.9",
     "@prisma/client": "^6.19.2",
     "@tailwindcss/typography": "^0.5.19",

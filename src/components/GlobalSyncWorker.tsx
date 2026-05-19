@@ -91,6 +91,10 @@ export default function GlobalSyncWorker() {
   // States for bulk cache sync (background)
   const [isBulkSyncing, setIsBulkSyncing] = useState(false)
   const [bulkProgress, setBulkProgress] = useState({ current: 0, total: 0 })
+  
+  // v471: Native-specific states for battery optimization and platform detection
+  const [isNativePlatform, setIsNativePlatform] = useState(false)
+  const [showBatteryWarning, setShowBatteryWarning] = useState(false)
 
   // Automatic Trigger: Start sync when session is available and we are online
   useEffect(() => {
@@ -102,6 +106,164 @@ export default function GlobalSyncWorker() {
       return () => clearTimeout(timer);
     }
   }, [session?.user?.id, isOnline]);
+
+  // v471: Detect native platform and check battery optimization status on launch
+  useEffect(() => {
+    async function checkBatteryExemption() {
+      try {
+        const { isNative, BatteryBridge } = await import('@/lib/native-bridge');
+        if (!isNative()) return;
+        
+        setIsNativePlatform(true);
+        
+        // Dynamic wait time before showing the battery optimization banner (5 seconds)
+        setTimeout(async () => {
+          const exempt = await BatteryBridge.isExempt();
+          if (!exempt) {
+            setShowBatteryWarning(true);
+          }
+        }, 5000);
+      } catch (err) {
+        console.error('[BatteryDefense] Error checking status:', err);
+      }
+    }
+    checkBatteryExemption();
+  }, []);
+
+  // v471: Listen for real-time background Kotlin synchronization service broadcasts
+  useEffect(() => {
+    let active = true;
+    
+    async function setupNativeListener() {
+      try {
+        const { isNative, SyncBridge } = await import('@/lib/native-bridge');
+        if (!isNative()) return;
+        
+        console.log('[NativeSync] Hooking into Kotlin BroadcastReceiver channels...');
+        
+        SyncBridge.onSyncEvent(async (event: any) => {
+          if (!active) return;
+          console.log('[NativeSync] Broadcast captured in WebView:', event);
+          
+          const { syncId, status, errorMessage, serverData } = event;
+          if (!syncId) return;
+          
+          // Locate the element in Dexie IndexedDB outbox queue
+          const localItem = await db.outbox.where('syncId').equals(syncId).first();
+          
+          if (status === 'COMPLETED') {
+            if (localItem) {
+              await db.outbox.delete(localItem.id!);
+              console.log(`[NativeSync] Cleaned completed item ${syncId} from IndexedDB outbox`);
+              
+              // Generate descriptive notifications matching item types
+              const syncLabel = localItem.type === 'GALLERY_UPLOAD' ? 'Archivo subido a galería' :
+                                localItem.type === 'MESSAGE' ? 'Mensaje enviado' :
+                                localItem.type === 'MEDIA_UPLOAD' ? 'Archivo multimedia enviado' :
+                                localItem.type === 'PROJECT' ? 'Proyecto creado correctamente' :
+                                localItem.type === 'EXPENSE' ? 'Gasto registrado offline' :
+                                localItem.type === 'TASK' ? 'Tarea sincronizada' :
+                                `Sincronización completa (${localItem.type})`;
+              
+              // Notify UI for dynamic toast and state refreshes
+              window.dispatchEvent(new CustomEvent('sync-success', { detail: { 
+                type: localItem.type, 
+                projectId: localItem.projectId, 
+                label: syncLabel,
+                payload: localItem.payload,
+                result: { success: true }
+              } }));
+              
+              await logSync('success', `✓ Sincronizado nativo: ${localItem.type}`, localItem.type);
+            }
+          } else if (status === 'FAILED') {
+            if (localItem) {
+              await db.outbox.update(localItem.id!, { 
+                status: 'failed', 
+                attempts: 10, 
+                failReason: errorMessage || 'Fallo en canal de servicio nativo' 
+              });
+              await logSync('error', `Fallo nativo: ${localItem.type} - ${errorMessage}`, localItem.type);
+            }
+          } else if (status === 'SYNCING') {
+            if (localItem) {
+              await db.outbox.update(localItem.id!, { status: 'syncing' });
+            }
+          } else if (status === 'CONFLICT') {
+            if (localItem) {
+              await db.outbox.update(localItem.id!, { 
+                status: 'failed', 
+                failReason: 'CONFLICT' 
+              });
+              
+              // Bubble conflict events up to the dashboard client
+              window.dispatchEvent(new CustomEvent('sync-conflict', { detail: {
+                syncId,
+                type: localItem.type,
+                projectId: localItem.projectId,
+                localData: localItem.payload,
+                serverData: serverData ? JSON.parse(serverData) : null
+              } }));
+              await logSync('warn', `Conflicto detectado: ${localItem.type}. Esperando resolución del usuario.`, localItem.type);
+            }
+          } else if (status === 'AUTH_REQUIRED') {
+            if (localItem) {
+              await db.outbox.update(localItem.id!, { status: 'pending' });
+              window.dispatchEvent(new CustomEvent('sync-auth-required'));
+              await logSync('error', 'Sesión expirada. Se requiere login para continuar sincronización.', 'auth');
+            }
+          }
+        });
+      } catch (err) {
+        console.error('[NativeSync] Failed to bind event channels:', err);
+      }
+    }
+    
+    setupNativeListener();
+    return () => { active = false; };
+  }, []);
+
+  // v471: Executed exactly once on first app launch to migrate legacy IndexedDB outbox to Room DB
+  useEffect(() => {
+    async function triggerMigration() {
+      try {
+        const { isNative, MigrationBridge } = await import('@/lib/native-bridge');
+        if (!isNative()) return;
+        
+        const needed = await MigrationBridge.checkNeeded();
+        if (needed) {
+          console.log('[Migration] Starting IndexedDB -> Room DB background transition...');
+          await logSync('info', 'Iniciando migración única de datos offline...', 'migration');
+          
+          const items = await db.outbox.toArray();
+          if (items.length > 0) {
+            const imported = await MigrationBridge.importOutboxItems(items);
+            console.log(`[Migration] Transitioned ${imported} outbox entries successfully.`);
+            await logSync('success', `Migrados ${imported} elementos pendientes a base de datos nativa Room DB`, 'migration');
+          }
+          
+          // Finalize migration lock to prevent repetitive checks
+          await MigrationBridge.markComplete();
+        }
+      } catch (err) {
+        console.error('[Migration] Failed to migrate local data:', err);
+      }
+    }
+    
+    const timer = setTimeout(triggerMigration, 3000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Battery exemption triggers
+  const handleRequestExemption = async () => {
+    try {
+      const { BatteryBridge } = await import('@/lib/native-bridge');
+      await BatteryBridge.requestBatteryExemption();
+      setShowBatteryWarning(false);
+    } catch (err) {
+      console.error('[BatteryDefense] Could not request exemption:', err);
+    }
+  };
 
   const startBulkSync = async (initialProjects: any[] = [], passedUserRole?: string, force = false) => {
     if (syncLock.current) return;
@@ -550,6 +712,15 @@ export default function GlobalSyncWorker() {
   
   const syncOutbox = async () => {
     if (typeof window === 'undefined' || !navigator.onLine || outboxLock.current) return
+    
+    // v471: Si es nativo (Capacitor), delegar 100% de la sincronización de la outbox al servicio nativo Kotlin
+    try {
+      const { isNative } = await import('@/lib/native-bridge');
+      if (isNative()) {
+        // console.log('[Sync] Plataforma nativa detectada. Delegando sincronización a Kotlin Foreground Service.');
+        return;
+      }
+    } catch (e) {}
     
     // v446: Reset stuck 'syncing' items — use primaryKeys to avoid OOM
     try {
@@ -1889,54 +2060,106 @@ export default function GlobalSyncWorker() {
     }
   }, [])
 
-  if (!uploadProgress) return null;
+  // Render JSX
+  const showProgress = !!uploadProgress;
+  const showBatteryExemption = isNativePlatform && showBatteryWarning;
+
+  if (!showProgress && !showBatteryExemption) return null;
 
   return (
-    <div className="sync-progress-container fixed bottom-20 right-4 z-[9999] w-72 animate-in fade-in slide-in-from-bottom-4 duration-500">
-      <style>{`
-        @media (max-width: 768px) {
-          .sync-progress-container {
-            left: 50% !important;
-            right: auto !important;
-            transform: translateX(-50%);
-            width: calc(100% - 32px) !important;
-            max-width: 350px;
-          }
-        }
-      `}</style>
-      <div className="bg-black/80 backdrop-blur-xl border border-white/10 p-5 rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.5)]">
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex flex-col">
-            <span className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold mb-0.5">Sincronizando Multimedia</span>
-            <span className="text-sm font-semibold text-white truncate max-w-[180px]">
-              {uploadProgress.filename}
-            </span>
-          </div>
-          <div className="bg-blue-500/10 px-2 py-1 rounded-lg border border-blue-500/20">
-            <span className="text-xs text-blue-400 font-black font-mono">
-              {uploadProgress.percent}%
-            </span>
+    <>
+      {showProgress && (
+        <div className="sync-progress-container fixed bottom-20 right-4 z-[9999] w-72 animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <style>{`
+            @media (max-width: 768px) {
+              .sync-progress-container {
+                left: 50% !important;
+                right: auto !important;
+                transform: translateX(-50%);
+                width: calc(100% - 32px) !important;
+                max-width: 350px;
+              }
+            }
+          `}</style>
+          <div className="bg-black/80 backdrop-blur-xl border border-white/10 p-5 rounded-3xl shadow-[0_20px_50px_rgba(0,0,0,0.5)]">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex flex-col">
+                <span className="text-[10px] uppercase tracking-widest text-zinc-500 font-bold mb-0.5">Sincronizando Multimedia</span>
+                <span className="text-sm font-semibold text-white truncate max-w-[180px]">
+                  {uploadProgress.filename}
+                </span>
+              </div>
+              <div className="bg-blue-500/10 px-2 py-1 rounded-lg border border-blue-500/20">
+                <span className="text-xs text-blue-400 font-black font-mono">
+                  {uploadProgress.percent}%
+                </span>
+              </div>
+            </div>
+            
+            <div className="relative h-2 w-full bg-white/5 rounded-full overflow-hidden">
+              <div 
+                className="absolute top-0 left-0 h-full bg-gradient-to-r from-blue-600 to-indigo-500 transition-all duration-500 ease-out shadow-[0_0_10px_rgba(37,99,235,0.5)]"
+                style={{ width: `${uploadProgress.percent}%` }}
+              />
+            </div>
+            
+            <div className="flex justify-between items-center mt-3">
+              <p className="text-[10px] text-zinc-500 font-medium">
+                Parte <span className="text-zinc-300 font-bold">{uploadProgress.chunk}</span> de <span className="text-zinc-300 font-bold">{uploadProgress.totalChunks}</span>
+              </p>
+              <div className="flex gap-1">
+                <div className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />
+                <div className="w-1 h-1 rounded-full bg-blue-500 animate-pulse delay-75" />
+                <div className="w-1 h-1 rounded-full bg-blue-500 animate-pulse delay-150" />
+              </div>
+            </div>
           </div>
         </div>
-        
-        <div className="relative h-2 w-full bg-white/5 rounded-full overflow-hidden">
-          <div 
-            className="absolute top-0 left-0 h-full bg-gradient-to-r from-blue-600 to-indigo-500 transition-all duration-500 ease-out shadow-[0_0_10px_rgba(37,99,235,0.5)]"
-            style={{ width: `${uploadProgress.percent}%` }}
-          />
-        </div>
-        
-        <div className="flex justify-between items-center mt-3">
-          <p className="text-[10px] text-zinc-500 font-medium">
-            Parte <span className="text-zinc-300 font-bold">{uploadProgress.chunk}</span> de <span className="text-zinc-300 font-bold">{uploadProgress.totalChunks}</span>
-          </p>
-          <div className="flex gap-1">
-            <div className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />
-            <div className="w-1 h-1 rounded-full bg-blue-500 animate-pulse delay-75" />
-            <div className="w-1 h-1 rounded-full bg-blue-500 animate-pulse delay-150" />
+      )}
+
+      {showBatteryExemption && (
+        <div className="battery-defense-toast fixed bottom-4 right-4 z-[9999] w-[350px] animate-in fade-in slide-in-from-bottom-4 duration-500">
+          <style>{`
+            @media (max-width: 768px) {
+              .battery-defense-toast {
+                left: 16px !important;
+                right: 16px !important;
+                width: auto !important;
+              }
+            }
+          `}</style>
+          <div className="bg-[#121214]/95 backdrop-blur-2xl border border-amber-500/20 p-5 rounded-[24px] shadow-[0_20px_50px_rgba(0,0,0,0.6)]">
+            <div className="flex gap-4">
+              <div className="flex-shrink-0 w-10 h-10 rounded-full bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
+                <svg className="w-5 h-5 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                </svg>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-[10px] uppercase tracking-widest text-amber-500 font-bold mb-1">Optimización de Batería</p>
+                <h4 className="text-sm font-semibold text-white mb-1.5 font-sans">Permitir Ejecución en 2do Plano</h4>
+                <p className="text-xs text-zinc-400 leading-relaxed mb-4">
+                  Android suspende la app al apagar la pantalla. Activa el modo "Sin restricciones" para asegurar sincronización 100% confiable.
+                </p>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={handleRequestExemption}
+                    className="flex-1 bg-amber-500 hover:bg-amber-400 text-black text-xs font-bold py-2.5 px-4 rounded-xl transition-all duration-300 shadow-[0_4px_12px_rgba(245,158,11,0.2)] active:scale-[0.98]"
+                  >
+                    Configurar Ahora
+                  </button>
+                  <button 
+                    onClick={() => setShowBatteryWarning(false)}
+                    className="bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-300 text-xs font-semibold py-2.5 px-4 rounded-xl transition-all duration-300 active:scale-[0.98]"
+                  >
+                    Después
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
-    </div>
+      )}
+    </>
   );
 }
