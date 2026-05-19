@@ -154,6 +154,34 @@ export const SyncBridge = {
   },
 
   /**
+   * Verifica si la app nativa tiene permiso de notificaciones (Android 13+).
+   */
+  async checkNotificationPermission(): Promise<boolean> {
+    if (!isNative()) return false;
+    const { Capacitor } = await import('@capacitor/core');
+    try {
+      const result = await (Capacitor as any).Plugins.SyncBridge.checkNotificationPermission();
+      return !!result.granted;
+    } catch {
+      return false;
+    }
+  },
+
+  /**
+   * Solicita el permiso nativo de notificaciones al sistema Android (Android 13+).
+   */
+  async requestNotificationPermission(): Promise<boolean> {
+    if (!isNative()) return false;
+    const { Capacitor } = await import('@capacitor/core');
+    try {
+      const result = await (Capacitor as any).Plugins.SyncBridge.requestNotificationPermission();
+      return !!result.granted;
+    } catch {
+      return false;
+    }
+  },
+
+  /**
    * Registra un listener para eventos del servicio de sync nativo.
    */
   onSyncEvent(callback: (event: { type: string; itemId?: string; data?: any }) => void): void {

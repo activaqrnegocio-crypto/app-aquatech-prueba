@@ -45,22 +45,20 @@ export function usePushNotifications() {
 
     const nativeMode = isNative()
 
-    // En la app nativa (APK), no disponemos de PushManager en el WebView,
-    // pero podemos activar las notificaciones locales/del sistema si 'Notification' existe.
     if (nativeMode) {
-      if (!('Notification' in window)) {
-        setStatus('unsupported')
-        return
-      }
-
-      const permission = Notification.permission
-      if (permission === 'denied') {
-        setStatus('denied')
-      } else if (permission === 'granted') {
-        setStatus('subscribed')
-      } else {
-        setStatus('prompt')
-      }
+      import('@/lib/native-bridge').then(async ({ SyncBridge }) => {
+        try {
+          const isGranted = await SyncBridge.checkNotificationPermission()
+          if (isGranted) {
+            setStatus('subscribed')
+          } else {
+            setStatus('prompt')
+          }
+        } catch (e) {
+          console.error('[PUSH] Error al verificar permisos nativos', e)
+          setStatus('unsupported')
+        }
+      })
       return
     }
 
@@ -119,36 +117,41 @@ export function usePushNotifications() {
     if (nativeMode) {
       setIsSubscribing(true);
       try {
-        let permission: NotificationPermission;
-        try {
-          permission = await Notification.requestPermission();
-        } catch (e) {
-          permission = await new Promise((res) => {
-            Notification.requestPermission((result) => res(result));
-          });
-        }
-
-        if (permission !== 'granted') {
-          setStatus('denied');
-          setIsSubscribing(false);
-          return { success: false, error: 'Permiso de notificaciones denegado por el usuario.' };
-        }
-
-        setStatus('subscribed');
-        setIsSubscribing(false);
-
-        // Mostrar notificación local de éxito nativa
-        try {
-          new Notification('✅ Notificaciones de App Activas', {
-            body: '¡Perfecto! Tu aplicación tiene permiso para recibir notificaciones nativas en el sistema.',
-            icon: '/icon-192.png',
-            badge: '/icon-192.png',
-          });
-        } catch (e) {
-          console.warn('[PUSH] Fallo al mostrar notificación local', e);
-        }
-
-        return { success: true };
+        const { SyncBridge } = await import('@/lib/native-bridge')
+        await SyncBridge.requestNotificationPermission()
+        
+        // Polling para detectar cuando el usuario concede el permiso
+        return new Promise((resolve) => {
+          let attempts = 0
+          const interval = setInterval(async () => {
+            attempts++
+            const isGranted = await SyncBridge.checkNotificationPermission()
+            if (isGranted) {
+              clearInterval(interval)
+              setStatus('subscribed')
+              setIsSubscribing(false)
+              
+              // Intentar mostrar notificación local nativa si está disponible en WebView
+              try {
+                if (typeof window !== 'undefined' && 'Notification' in window) {
+                  new Notification('✅ Notificaciones de App Activas', {
+                    body: '¡Perfecto! Tu aplicación tiene permiso para recibir notificaciones nativas en el sistema.',
+                    icon: '/icon-192.png',
+                    badge: '/icon-192.png',
+                  });
+                }
+              } catch (e) {
+                console.warn('[PUSH] Fallo al mostrar notificación local', e)
+              }
+              
+              resolve({ success: true })
+            } else if (attempts > 30) { // 15 segundos máximo
+              clearInterval(interval)
+              setIsSubscribing(false)
+              resolve({ success: false, error: 'No se activaron las notificaciones.' })
+            }
+          }, 500)
+        })
       } catch (error: any) {
         setStatus('unsupported');
         setIsSubscribing(false);
