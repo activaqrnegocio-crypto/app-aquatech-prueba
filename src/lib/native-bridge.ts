@@ -182,6 +182,23 @@ export const SyncBridge = {
   },
 
   /**
+   * Retorna la versión nativa del paquete APK actual (versionName y versionCode).
+   */
+  async getAppVersion(): Promise<{ version: string; build: number }> {
+    if (!isNative()) return { version: '1.0.0', build: 1 };
+    const { Capacitor } = await import('@capacitor/core');
+    try {
+      const result = await (Capacitor as any).Plugins.SyncBridge.getAppVersion();
+      return {
+        version: result.version || '1.0.0',
+        build: Number(result.build) || 1
+      };
+    } catch {
+      return { version: '1.0.0', build: 1 };
+    }
+  },
+
+  /**
    * Registra un listener para eventos del servicio de sync nativo.
    */
   onSyncEvent(callback: (event: { type: string; itemId?: string; data?: any }) => void): void {

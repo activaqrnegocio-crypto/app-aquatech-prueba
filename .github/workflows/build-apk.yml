@@ -1,0 +1,78 @@
+name: Build and Upload Android APK
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-apk:
+    name: Build Android APK (GitHub Runners)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+        env:
+          DATABASE_URL: mysql://dummy:dummy@localhost:3306/dummy
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v3
+        with:
+          java-version: '17'
+          distribution: 'zulu'
+
+      - name: Sync Capacitor Android
+        run: npx cap sync android
+
+      - name: Build Android APK with Gradle
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+
+      - name: Generate and Upload apk-version.json & APK to BunnyCDN
+        run: |
+          # 1. Extraer versión y código del build.gradle
+          VERSION_NAME=$(grep "versionName" android/app/build.gradle | head -n 1 | awk '{print $2}' | tr -d '"')
+          VERSION_CODE=$(grep "versionCode" android/app/build.gradle | head -n 1 | awk '{print $2}')
+          
+          echo "Compilando versión nativa detectada: v$VERSION_NAME (Build $VERSION_CODE)"
+          
+          # 2. Generar apk-version.json dinámicamente
+          cat <<EOF > apk-version.json
+          {
+            "version": "$VERSION_NAME",
+            "build": $VERSION_CODE,
+            "url": "https://cesarweb.b-cdn.net/aquatech-crm.apk",
+            "changelog": "Puente de permisos nativos de notificaciones y optimización de base de datos offline SQLite."
+          }
+          EOF
+          
+          # 3. Subir apk-version.json a BunnyCDN
+          curl --request PUT \
+            --url "https://br.storage.bunnycdn.com/cesarweb/apk-version.json" \
+            --header "AccessKey: 90197f22-eb2d-4e71-8d5b3893666a-3c2c-44b4" \
+            --header "Content-Type: application/json" \
+            --upload-file apk-version.json
+            
+          # 4. Subir el APK a BunnyCDN
+          curl --request PUT \
+            --url "https://br.storage.bunnycdn.com/cesarweb/aquatech-crm.apk" \
+            --header "AccessKey: 90197f22-eb2d-4e71-8d5b3893666a-3c2c-44b4" \
+            --upload-file android/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload APK as GitHub Run Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aquatech-crm-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
