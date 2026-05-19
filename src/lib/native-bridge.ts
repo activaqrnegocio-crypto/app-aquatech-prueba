@@ -13,24 +13,18 @@ import type { OutboxItem } from './db';
 
 // ─── Platform Detection ────────────────────────────────────────────────
 
-let _isNative: boolean | null = null;
-
 /**
  * Detecta si estamos corriendo en la app nativa (Capacitor) o en el navegador.
- * El resultado se cachea después de la primera llamada.
  */
 export function isNative(): boolean {
-  if (_isNative !== null) return _isNative;
-  
   try {
-    // Capacitor inyecta este objeto cuando corre en WebView nativo
     const win = window as any;
-    _isNative = !!(win.Capacitor && win.Capacitor.isNativePlatform && win.Capacitor.isNativePlatform());
+    const hasCapacitor = !!(win.Capacitor && win.Capacitor.isNativePlatform && win.Capacitor.isNativePlatform());
+    const isAndroidWebView = typeof navigator !== 'undefined' && navigator.userAgent.includes('; wv)');
+    return hasCapacitor || isAndroidWebView;
   } catch {
-    _isNative = false;
+    return false;
   }
-  
-  return _isNative;
 }
 
 /**
