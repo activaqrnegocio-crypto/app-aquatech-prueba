@@ -7,7 +7,7 @@ const config: CapacitorConfig = {
   // Remote content: la app carga la web desde tu VPS
   // Cuando cambies de dominio, actualiza esta URL
   server: {
-    url: 'https://178.238.238.158.sslip.io/admin',
+    url: 'https://app-aquatech-prueba.vercel.app/admin',
     cleartext: false, // Solo HTTPS
   },
 
